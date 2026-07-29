@@ -19,11 +19,9 @@ jq
 matplotlib
 ## Embeddings
 langchain-huggingface
-sentence-transformers
 langchain-experimental
 rank_bm25
 wikipedia
 langgraph
 langchain-text-splitters
 ipywidgets
-langchain-community
