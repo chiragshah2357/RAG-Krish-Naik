@@ -490,6 +490,122 @@ expand query → hybrid retrieve → rerank → (MMR) → generate
 
 ---
 
+# 8. Query Enhancement — Query Decomposition
+
+## The core idea
+Query expansion (#7) enriches **one** query. Query decomposition goes the other way: it **splits one complex, multi-part question into several simpler, atomic sub-questions** — each retrieved and answered on its own, then stitched back together.
+
+> Query decomposition = take a **complex, multi-part** question → break it into simpler **atomic sub-questions** that can each be retrieved and answered individually.
+
+## Why use it
+- **Complex queries pack multiple concepts** into one sentence.
+- **Retrievers/LLMs miss parts** — a single embedding of a two-part question leans toward the dominant part and drops the rest.
+- **Enables multi-hop reasoning** — answer in steps.
+- **Allows parallelism** — sub-questions fan out independently (great in multi-agent frameworks).
+
+## Two ways to split the query
+
+| # | Method | How |
+|---|--------|-----|
+| 1 | **LLM + prompt** | Ask an LLM to rewrite the complex query into a list of sub-questions |
+| 2 | **Regex operation** | Cheap split on punctuation (`. , ! ?`) — no LLM call needed |
+
+## Worked example
+**Complex query:**
+> "What memory modules does LangChain support, and how are they different from CrewAI?"
+
+**Decomposer → 3 sub-questions:**
+```
+Sub Q1: "What memory modules does LangChain support?"
+Sub Q2: "CrewAI agents / memory"
+Sub Q3: "LangChain memory vs CrewAI agents"
+```
+
+## How Query Decomposition works
+```
+                          Complex Query (q)
+                                │
+                       ┌────────┴────────┐
+                       │   Decomposer    │   ← LLM+prompt  OR  regex [.,!?]
+                       └────────┬────────┘
+          ┌─────────────────────┼─────────────────────┐
+        Sub Q1                Sub Q2                 Sub Q3
+          │                     │                      │
+       Retriever             Retriever              Retriever
+          │  Top K              │  Top K               │  Top K
+       Context               Context                Context
+          │                     │                      │
+       LLM Call              LLM Call               LLM Call     (+ prompt)
+          │  O1                 │  O2                  │  O3
+          └─────────────────────┼──────────────────────┘
+                                ▼
+                 ┌──────────────────────────────┐
+                 │ Answer Combiner / Synthesizer │
+                 └──────────────────────────────┘
+                                │
+                                ▼
+                           Final Answer
+```
+Each sub-question runs the **full retrieve → LLM** loop on its own; a final **synthesizer** merges `O1 + O2 + O3` into one grounded answer.
+
+## Expansion vs Decomposition
+
+| | Query Expansion (#7) | Query Decomposition (#8) |
+|---|---|---|
+| **Does what** | Enriches **one** query with synonyms/related terms | Splits **one** query into **many** sub-queries |
+| **Output** | 1 wider query | N atomic sub-questions |
+| **Best for** | Short / vague / under-specified queries | Complex, multi-part questions |
+| **Retrieval** | one pass | one pass **per** sub-question |
+
+## Major disadvantage
+**Many LLM calls and retrieval calls.** One question becomes N sub-questions, each costing a retrieval + an LLM call, plus a final synthesis call — so latency and cost scale with the number of sub-questions.
+
+> Expansion widens the net; decomposition breaks a hard question into easy ones — at the price of more calls.
+
+---
+
+# 9. Multimodal RAG
+
+## The core idea
+Normal RAG only retrieves and reasons over **text**. Multimodal RAG extends the pipeline to **text *and* images** — so a query can pull the relevant paragraph *and* the relevant chart/photo from your documents, and the LLM answers using both.
+
+> Same RAG skeleton (chunk → embed → store → retrieve → generate) — but every stage now handles images alongside text.
+
+## The two pieces that make it "multimodal"
+
+| Piece | Job |
+|-------|-----|
+| **CLIP** (embeddings) | *Contrastive Language–Image Pre-training* — embeds text **and** images into **one shared vector space**, so a text query can match image content. Built from a **Vision Transformer (images) + Transformer (text)**. |
+| **Multimodal LLM** (generation) | An LLM that reads text **and** images to write the answer — e.g. OpenAI `gpt-4.1`, Google `gemini-flash-2.5`. |
+
+## The pipeline
+```
+INGEST                                   QUERY
+PDF / doc                                Query
+   │ extract                               │ CLIP embed
+   ├─ text  → chunk → embed ┐              ▼
+   └─ images ──────→ embed ─┤          Retriever ──► top-K (text + image)
+                            │              │
+                     (CLIP embeddings)     ▼  format
+                            ▼          Multimodal LLM  (gpt-4.1 / gemini)
+                          FAISS  ◄─────────┘          │
+                     (vector store)                   ▼
+                                               Multimodal Answer
+```
+1. **Extract** text *and* images from each document.
+2. **Embed both** with **CLIP** (images often passed as base64) → one shared space.
+3. **Store** the vectors in **FAISS** (or any vector store).
+4. **Query** → CLIP-embed → retrieve the top-K **text + image** matches.
+5. **Generate** — feed the retrieved text and images to a **multimodal LLM** → a grounded answer that uses both.
+
+## Why it matters
+- Answers questions whose evidence lives in **figures, tables, screenshots, or scanned pages** — not just prose.
+- **CLIP's shared space** is the key trick: text and images become comparable, so one query hits both modalities at once.
+
+> Text-only RAG reads the words; multimodal RAG also *sees the pictures*.
+
+---
+
 # Appendix A — LangChain 1.x Import Migration
 
 LangChain 1.x split the monolith into packages. Course material using `from langchain.<something>` is almost certainly outdated.
