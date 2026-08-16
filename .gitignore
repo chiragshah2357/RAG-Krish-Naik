@@ -16,3 +16,4 @@ wheels/
 chroma_db/
 1-chroma_db/
 faiss_index/
+output/
