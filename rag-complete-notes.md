@@ -705,3 +705,112 @@ pip install -qU faiss-cpu rank_bm25 sentence-transformers python-dotenv
 | **Chroma / FAISS / Qdrant** | Fully free | Yes — run locally, $0 forever |
 
 **Pinecone vs AstraDB:** Pinecone is a purpose-built, vector-native, proprietary database — vectors are the primary object. AstraDB is Apache Cassandra (DataStax) with vector search added, so you get full CQL and can keep app data + embeddings in one store. Pick Pinecone for a focused best-in-class vector index; pick AstraDB for open-source foundations and one DB for everything.
+
+---
+
+# 10. LangChain — Model Integration (`init_chat_model`)
+
+## The `provider:model` format
+`init_chat_model` (and `create_agent`) need a **provider prefix** so LangChain knows which integration to route to:
+```python
+model = init_chat_model("groq:llama-3.3-70b-versatile")
+model = init_chat_model("google_genai:gemini-flash-latest")
+```
+Drop the prefix and LangChain **guesses** the provider — e.g. plain `"gemini-2.5-flash"` gets inferred as `google_vertexai`, which tries to import `langchain_google_vertexai` and throws `ModuleNotFoundError`. Always include the prefix.
+
+## Each provider needs its own package installed
+| Provider prefix | Package | API key env |
+|---|---|---|
+| `groq:` | `langchain-groq` | `GROQ_API_KEY` |
+| `google_genai:` | `langchain-google-genai` | `GOOGLE_API_KEY` |
+
+Missing package → `ModuleNotFoundError`. Fix: `pip install <package>`, then **restart the kernel** (`load_dotenv()`/imports don't refresh in a live kernel).
+
+## Common errors decoded
+| Error | Real cause | Fix |
+|---|---|---|
+| `ValueError: Unable to infer model provider` | no `provider:` prefix | add prefix |
+| `ModuleNotFoundError: langchain_google_vertexai` | wrong provider inferred | use `google_genai:` |
+| `401 invalid_api_key / expired_api_key` | key wrong/expired | new key in `.env`, restart kernel |
+| `404 NOT_FOUND ... no longer available` | model retired by provider | use a newer model |
+| `404 model does not exist or no access` | your key can't call that model | pick from your key's actual list |
+
+## Verify what your key can actually call
+Don't trust model names from tutorials — list them:
+```python
+# Groq
+import os, requests
+r = requests.get("https://api.groq.com/openai/v1/models",
+                 headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"})
+for m in r.json()["data"]: print(m["id"])
+
+# Gemini
+from google import genai
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+for m in client.models.list(): print(m.name)   # drop the "models/" prefix when using
+```
+That printout is ground-truth. A model can appear in the *list* yet still be blocked for *generation* (e.g. "no longer available to new users") — when in doubt, test-invoke it.
+
+## Not every listed model is a chat model
+Provider lists mix model types. Only **chat/text** models work with `.invoke("some prompt")`:
+- `whisper-*` → speech-to-text (audio in, not text)
+- `orpheus-*` → text-to-speech
+- `*-prompt-guard-*`, `*-safeguard-*` → content moderation, not conversation
+
+Prefer a **`-latest`** alias (e.g. `gemini-flash-latest`) so provider retirements don't break your code.
+
+---
+
+# 11. LangChain — Tools & Agents
+
+## Why tools exist
+An LLM only outputs **text** — it can't fetch live data, do exact math, or take actions. **Tools give it hands**: live weather/prices, database/RAG lookups, sending email, running code. Without tools the model is a closed book frozen at its training cutoff.
+
+## Defining a tool
+```python
+from langchain.tools import tool
+
+@tool
+def get_weather(location: str) -> str:
+    """Get the weather at a location"""      # docstring = WHEN to use it
+    return f"It's sunny in {location}"
+```
+The `@tool` decorator exposes three things to the model: **name**, **docstring** (tells it *when* to call), and **params/types** (tells it *what args to supply*).
+
+```python
+model_with_tools = model.bind_tools([get_weather])   # hands the model a "menu"
+```
+
+## Key insight: you don't predict the question — the model routes
+`bind_tools` doesn't hardcode any trigger. At runtime the model reads the user's message and **decides per-turn** whether a tool fits:
+- "weather in Boston?" → returns a tool-call request for `get_weather`
+- "national food of England?" → **no tool**, `tool_calls` is empty, answers directly from its own knowledge
+
+So irrelevant questions don't break anything. To cover more cases, give it **more tools** and it picks the right one (or none):
+```python
+model.bind_tools([get_weather, web_search, get_stock_price, query_my_docs])
+```
+
+## The manual agent loop (what `create_agent` automates)
+`bind_tools` only lets the model **request** a call — it never runs the function. Executing it takes **two model calls** with your code in between:
+```python
+# 1. Model decides to use a tool
+messages = [{"role": "user", "content": "What's the weather in Boston?"}]
+ai_msg = model_with_tools.invoke(messages)     # returns tool_calls, NOT a final answer
+messages.append(ai_msg)
+
+# 2. YOU execute the tool(s) and feed results back
+for tool_call in ai_msg.tool_calls:
+    tool_result = get_weather.invoke(tool_call)
+    messages.append(tool_result)
+
+# 3. Model reads the result and writes the final reply
+final = model_with_tools.invoke(messages)
+print(final.text)
+```
+```
+invoke #1 → "I need get_weather('Boston')"
+   your code runs it → "It's sunny in Boston"
+invoke #2 → "The weather in Boston is sunny."
+```
+`create_agent(model=..., tools=[...], system_prompt=...)` runs this whole `model → tools → model` loop for you — that's exactly the `__start__ → model → tools → __end__` graph.
